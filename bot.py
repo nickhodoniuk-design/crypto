@@ -1,22 +1,33 @@
 import asyncio
 import requests
 import time
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 # ==================== НАЛАШТУВАННЯ БОТА ====================
-# Вставте сюди свій токен (слово 'bot' на початку писати НЕ ТРЕБА, лише цифри та літери)
 TOKEN = "8955162722:AAELKreThbmZq7FfacTqTgZSFpS2MbpWMiQ"
-
-# Вставте сюди юзернейм вашого каналу (обов'язково з @ на початку)
 CHANNEL_ID = "@crypsignalsa"
-
-# Ваше реферальне посилання для заробітку
 REFERRAL_LINK = "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=ru-UA&ref=GRO_28502_MDLIC&utm_source=referral_entrance"
-
-# Чутливість (зміна ціни в % за 5 хвилин)
 SENSITIVITY_PERCENT = 1.5
 # ===========================================================
 
 LAST_PRICES = {}
+
+# --- МІКРО-СЕРВЕР ДЛЯ ОБХОДУ ПЕРЕВІРОК РЕНДЕРУ (ПОРТ) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"🌍 Скритий веб-сервер запущений на порту {port} для Render.")
+    server.serve_forever()
+# --------------------------------------------------------
 
 def get_all_usdt_pairs():
     try:
@@ -24,13 +35,11 @@ def get_all_usdt_pairs():
         response = requests.get(url, timeout=10).json()
         return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
     except Exception as e:
-        print("Помилка підключення до основного дата-сервера. Пробую резервний...")
         try:
             url = "https://binance.com"
             response = requests.get(url, timeout=10).json()
             return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
         except Exception as e2:
-            print("Не вдалося отримати дані з жодного сервера:", e2)
             return {}
 
 async def check_crypto():
@@ -41,32 +50,17 @@ async def check_crypto():
     if LAST_PRICES:
         print(f"✅ Успішно взято в роботу {len(LAST_PRICES)} криптопар. Починаю аналіз ринку...")
         
-        # --- ТЕСТОВИЙ СИГНАЛ ДЛЯ ПЕРЕВІРКИ ---
-        print("📢 Надсилаю тестовий сигнал у ваш Telegram-канал...")
-        test_text = (
-            "🔔 **Тестовий запуск криптобота пройшов успішно!**\n\n"
-            "З цього моменту я стежу за 771 криптопарою на біржі Binance і буду публікувати сюди сигнали про різкі рухи цін."
-        )
-        # ОФІЦІЙНО ВИПРАВЛЕНЕ ПОСИЛАННЯ З КОСОЮ ЛІНІЄЮ (/) ТА ЗАХИСТОМ
+        # Тестовий сигнал
         clean_token = TOKEN.replace('bot', '')
         telegram_url = f"https://telegram.org{clean_token}/sendMessage"
-        
+        test_text = "🔔 **Криптобот успішно запущений на цілодобовому сервері Render!**\n\nСистема працює 24/7 і аналізує 771 криптопару."
         try:
-            res = requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": test_text, "parse_mode": "Markdown"})
-            if res.status_code == 200:
-                print("🎉 Тестове повідомлення успішно з'явилося в каналі!")
-            else:
-                print(f"❌ Помилка Telegram. Відповідь сервера: {res.text}\nПеревірте, чи правильно вказано @юзернейм каналу і чи додано бота в адміни!")
-        except Exception as telegram_err:
-            print(f"❌ Не вдалося надіслати тест: {telegram_err}")
-        # -------------------------------------
-        
-    else:
-        print("❌ Не вдалося отримати початкові ціни. Перевірте підключення до інтернету.")
-    
+            requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": test_text, "parse_mode": "Markdown"})
+        except:
+            pass
+            
     while True:
-        await asyncio.sleep(300) # Перевірка ринку кожні 5 хвилин
-        
+        await asyncio.sleep(300)
         try:
             current_prices = get_all_usdt_pairs()
             if not current_prices:
@@ -85,13 +79,8 @@ async def check_crypto():
                 
                 if abs(change) >= SENSITIVITY_PERCENT:
                     coin_name = symbol.replace("USDT", " / USDT")
-                    
-                    if change > 0:
-                        direction = f"🟢 РІЗКИЙ РІСТ {coin_name}!"
-                        action = "📈 Рекомендація: LONG (Купівля)"
-                    else:
-                        direction = f"🔴 РІЗКЕ ПАДІННЯ {coin_name}!"
-                        action = "📉 Рекомендація: SHORT (Продаж)"
+                    direction = f"🟢 РІЗКИЙ РІСТ {coin_name}!" if change > 0 else f"🔴 РІЗКЕ ПАДІННЯ {coin_name}!"
+                    action = "📈 Рекомендація: LONG (Купівля)" if change > 0 else "📉 Рекомендація: SHORT (Продаж)"
                         
                     text = (
                         f"{direction}\n\n"
@@ -105,12 +94,13 @@ async def check_crypto():
                     clean_token = TOKEN.replace('bot', '')
                     telegram_url = f"https://telegram.org{clean_token}/sendMessage"
                     requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True})
-                    print(f"🚀 Сигнал надіслано в канал по монеті {symbol}!")
             
             LAST_PRICES = current_prices
-            
         except Exception as e:
-            print(f"Помилка в циклі аналізу: {e}")
+            print(f"Помилка в циклі: {e}")
 
 if __name__ == "__main__":
+    # Запускаємо веб-сервер у фоновому потоці для Render
+    threading.Thread(target=run_health_server, daemon=True).start()
+    # Запускаємо аналіз крипти
     asyncio.run(check_crypto())
