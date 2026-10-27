@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import asyncio
 import logging
 import hashlib
@@ -15,20 +16,21 @@ from aiogram.types import (
 )
 import yt_dlp
 
-# ================= КОНФІГУРАЦІЯ =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
+# ================= 1. ТОКЕН ТА НАЛАШТУВАННЯ =================
+# Якщо токен додано в Render у вкладці Environment — він підтягнеться сам.
+# Якщо ні — вставте свій токен замість тексту в других лапках:
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "СЮДИ_ТОКЕН_ЯКЩО_НЕ_В_ENVIRONMENT")
 PORT = int(os.getenv("PORT", 8080))
 
-# ================= РЕКЛАМНИЙ БЛОК (СПОНСОР) =================
-# Змініть посилання на свій канал або юзернейм для замовлення реклами
+# ================= 2. РЕКЛАМНИЙ БЛОК =================
 DEFAULT_AD = (
     "🔥 <b>Спонсор:</b> Найвигідніші знижки та товари 👉 <a href='https://t.me/telegram'>Перейти в канал</a>\n"
     "<i>(Купити рекламу в боті: @ваш_юзернейм)</i>"
 )
 AD_BANNER = os.getenv("AD_BANNER", DEFAULT_AD)
-# ============================================================
+# =====================================================
 
-# Швидка пам'ять для прив'язки кнопок аудіо до посилань
+# Пам'ять посилань для кнопок скачування аудіо
 URL_CACHE = {}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -70,11 +72,10 @@ async def cmd_start(message: types.Message):
     await message.answer(welcome_text, reply_markup=keyboard, parse_mode="HTML")
 
 
-# ================= ФОНОВІ ФУНКЦІЇ ЗАВАНТАЖЕННЯ =================
+# ================= ЗАВАНТАЖЕННЯ ВІДЕО ТА АУДІО =================
 def download_video_sync(url: str, download_dir: str):
     ydl_opts = {
         'outtmpl': os.path.join(download_dir, '%(id)s.%(ext)s'),
-        # Розумний підбір якості: намагаємось вписатися в ліміт 50 МБ Telegram
         'format': 'bestvideo[filesize_approx<48M][ext=mp4]+bestaudio[ext=m4a]/best[filesize_approx<48M][ext=mp4]/best[height<=720]/best',
         'quiet': True,
         'no_warnings': True,
@@ -118,13 +119,13 @@ async def handle_media_url(message: types.Message):
 
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
-            # Генеруємо короткий ключ для кнопки аудіо
+            # Генеруємо короткий хеш для кнопки
             url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
             URL_CACHE[url_hash] = url
 
             clean_title = re.sub(r'<[^>]+>', '', title)[:80]
 
-            # ЯКЩО ФАЙЛ БІЛЬШИЙ ЗА 49.5 МБ — НАДСИЛАЄМО КНОПКУ ПРЯМОГО СКАЧУВАННЯ
+            # Якщо відео більше 49.5 МБ — даємо пряме посилання
             if file_size_mb > 49.5:
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📥 Завантажити напряму на телефон", url=direct_url)],
@@ -133,7 +134,7 @@ async def handle_media_url(message: types.Message):
                 text = (
                     f"🎬 <b>{clean_title}</b>\n\n"
                     f"⚠️ <b>Відео важить {file_size_mb:.1f} МБ</b> (Telegram не дозволяє ботам надсилати файли понад 50 МБ).\n\n"
-                    f"Ви можете безкоштовно завантажити його у вихідній якості через браузер:\n"
+                    f"Ви можете завантажити його безпосередньо через браузер:\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"{AD_BANNER}"
                 )
@@ -141,7 +142,7 @@ async def handle_media_url(message: types.Message):
                 await status_msg.delete()
                 return
 
-            # ЯКЩО ФАЙЛ ВПИСАВСЯ В ЛІМІТ — ВІДПРАВЛЯЄМО ВІДЕО В ЧАТ
+            # Якщо файл нормального розміру — шлемо відео
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎵 Завантажити лише аудіо (MP3)", callback_data=f"audio_{url_hash}")]
             ])
@@ -166,18 +167,18 @@ async def handle_media_url(message: types.Message):
             logging.error(f"Помилка завантаження: {e}")
             await status_msg.edit_text(
                 "❌ <b>Помилка:</b> не вдалося обробити це відео.\n"
-                "<i>(Можливо, профіль автора приватний або відео було видалено)</i>",
+                "<i>(Можливо, профіль автора закритий або відео видалено)</i>",
                 parse_mode="HTML"
             )
 
 
-# ================= ОБРОБКА КНОПКИ АУДІО =================
+# ================= КНОПКА ЗАВАНТАЖЕННЯ АУДІО =================
 @dp.callback_query(F.data.startswith("audio_"))
 async def extract_audio_callback(call: CallbackQuery):
     url_hash = call.data.split("_")[1]
     url = URL_CACHE.get(url_hash)
 
-    # Якщо пам'ять оновилася — шукаємо посилання в повідомленні, на яке була відповідь
+    # Якщо пам'ять скинулася — шукаємо посилання у повідомленні вище
     if not url and call.message.reply_to_message and call.message.reply_to_message.text:
         match = URL_PATTERN.search(call.message.reply_to_message.text)
         if match:
@@ -220,10 +221,41 @@ async def extract_audio_callback(call: CallbackQuery):
             await wait_msg.edit_text("❌ Не вдалося отримати аудіо.")
 
 
-# ================= ВЕБСЕРВЕР ДЛЯ RENDER (ЖИТТЯ БОТА 24/7) =================
+# ================= ВЕБСЕРВЕР ДЛЯ RENDER (Щоб бот жив 24/7) =================
 async def handle_ping(request):
     return web.Response(text="Media Downloader Bot is Running 24/7!")
 
 async def start_web_server():
     app = web.Application()
-    a
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Вебсервер активний на порті {PORT}", flush=True)
+
+
+# ================= ГОЛОВНИЙ ЗАПУСК =================
+async def main():
+    try:
+        # 1. Запуск вебсервера для Render
+        await start_web_server()
+
+        # 2. Очищення старих підвислих з'єднань
+        await bot.delete_webhook(drop_pending_updates=True)
+
+        # 3. Перевірка авторизації токена
+        me = await bot.get_me()
+        print(f"✅ Бот успішно підключився: @{me.username}", flush=True)
+
+        # 4. Старт прийому повідомлень
+        print("🚀 Починаємо приймати повідомлення...", flush=True)
+        await dp.start_polling(bot, drop_pending_updates=True)
+
+    except Exception as e:
+        print(f"❌ Критична помилка під час старту: {e}", flush=True)
+        raise e
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
