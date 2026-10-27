@@ -492,4 +492,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import requests
+
+    urls = [
+        "https://fapi.binance.com/fapi/v1/time",
+        "https://fapi1.binance.com/fapi/v1/time",
+        "https://fapi2.binance.com/fapi/v1/time",
+        "https://fapi3.binance.com/fapi/v1/time",
+    ]
+
+    for url in urls:
+        try:
+            response = requests.get(url, timeout=10)
+            print(url, response.status_code, response.text[:150])
+        except Exception as exc:
+            print(url, "ERROR:", exc)
