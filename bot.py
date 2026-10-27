@@ -7,7 +7,7 @@ import threading
 
 # ==================== НАЛАШТУВАННЯ БОТА ====================
 TOKEN = "8955162722:AAELKreThbmZq7FfacTqTgZSFpS2MbpWMiQ"
-CHANNEL_ID = "@crypsignalsa"
+CHANNEL_ID = "-1007810123995"
 REFERRAL_LINK = "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=ru-UA&ref=GRO_28502_MDLIC&utm_source=referral_entrance"
 SENSITIVITY_PERCENT = 1.5
 # ===========================================================
