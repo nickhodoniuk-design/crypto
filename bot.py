@@ -9,7 +9,7 @@ import threading
 TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
 CHANNEL_ID = "-1007810123995"
 REFERRAL_LINK = "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=ru-UA&ref=GRO_28502_MDLIC&utm_source=referral_entrance"
-SENSITIVITY_PERCENT = 1.5
+SENSITIVITY_PERCENT = 0.0
 # ===========================================================
 
 LAST_PRICES = {}
