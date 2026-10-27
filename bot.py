@@ -83,7 +83,7 @@ async def cmd_start(message: types.Message):
     await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 
-# ================= ШІ-ПАРСИНГ ЗВИЧАЙНОЇ МОВИ =================
+# ================= ШІ-ПАРСИНГ ЗВИЧАЙНОЇ МОВИ (З АВТОПЕРЕКЛЮЧЕННЯМ МОДЕЛЕЙ) =================
 async def parse_reminder_with_ai(user_text: str) -> dict | None:
     now = datetime.now(KYIV_TZ)
     current_time_str = now.strftime("%Y-%m-%d %H:%M (%A)")
@@ -114,26 +114,36 @@ async def parse_reminder_with_ai(user_text: str) -> dict | None:
     }}
     """
 
-    try:
-        response = await groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=200
-        )
-        content = response.choices[0].message.content.strip()
-        # Очищуємо від можливих markdown-лапок
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        return json.loads(content.strip())
-    except Exception as e:
-        logging.error(f"Помилка парсингу ШІ: {e}")
-        return None
+    # Список актуальних безкоштовних моделей Groq
+    AVAILABLE_MODELS = [
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "groq/compound"
+    ]
 
+    for model_name in AVAILABLE_MODELS:
+        try:
+            response = await groq_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_completion_tokens=1000
+            )
+            content = response.choices[0].message.content.strip()
+            
+            # Витягуємо чистий JSON навіть якщо модель додала роздуми
+            start_idx = content.find("{")
+            end_idx = content.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                content = content[start_idx:end_idx+1]
+
+            return json.loads(content.strip())
+        except Exception as e:
+            logging.warning(f"Модель {model_name} не відповіла ({e}), перемикаємося на наступну...")
+            continue
+
+    logging.error("Жодна з доступних моделей Groq не змогла обробити запит.")
+    return None
 
 # ================= ОБРОБКА ПОВІДОМЛЕНЬ =================
 @dp.message(F.text == "➕ Створити нагадування")
