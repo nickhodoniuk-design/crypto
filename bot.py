@@ -7,51 +7,26 @@ import pandas as pd
 
 # === НАСТРОЙКИ BOT / TELEGRAM ===
 TELEGRAM_TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
-CHAT_ID = "-1007810123995"
-TIMEFRAME = '15m'
+CHAT_ID = "7810123995"
+TIMEFRAME = '15m'  # Таймфрейм (15 минут)
 # ================================
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Бот работает в фоновом режиме!", 200
+    return "Бот Bybit работает в фоновом режиме!", 200
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-# === ИНИЦИАЛИЗАЦИЯ БИРЖИ С ОБХОДОМ БЛОКИРОВКИ ===
-exchange = ccxt.binance({
-    'options': {'defaultType': 'future'},
-    'enableRateLimit': True,
+
+# Инициализируем биржу Bybit для работы с фьючерсами USDT
+exchange = ccxt.bybit({
+    'options': {'defaultType': 'linear'},  # Линейные фьючерсы (USDT)
+    'enableRateLimit': True
 })
-# Переопределяем базовые адреса API на глобальные фьючерсные эндпоинты, 
-# которые не блокируют американские и европейские хостинги
-exchange.urls['api']['public'] = 'https://binance.com'
-exchange.urls['api']['private'] = 'https://binance.com'
-exchange.urls['api']['v1'] = 'https://binance.com/fapi/v1'
-
-def get_all_futures_symbols():
-    """Безопасное получение списка фьючерсов напрямую через fapi без использования основного ://binance.com"""
-    try:
-        # Делаем прямой запрос к фьючерсному API, минуя заблокированный спотовый эндпоинт
-        response = exchange.fapiPublicGetExchangeInfo()
-        symbols = []
-        if 'symbols' in response:
-            for market in response['symbols']:
-                # Фильтруем только активные пары к USDT (например, BTCUSDT)
-                if market['status'] == 'TRADING' and market['quoteAsset'] == 'USDT':
-                    # Превращаем в формат CCXT (BTC/USDT)
-                    base = market['baseAsset']
-                    quote = market['quoteAsset']
-                    symbols.append(f"{base}/{quote}")
-        return symbols
-    except Exception as e:
-        print(f"Ошибка получения монет через fapi: {e}")
-        return []
-
-
 
 def calculate_rsi(series, period=14):
-    """Ручной расчет RSI без сторонних библиотек"""
+    """Ручной расчет RSI"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -59,7 +34,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_atr(df, period=14):
-    """Ручной расчет ATR без сторонних библиотек"""
+    """Ручной расчет ATR"""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -68,24 +43,28 @@ def calculate_atr(df, period=14):
     return true_range.rolling(window=period).mean()
 
 def get_all_futures_symbols():
+    """Получение всех активных фьючерсных пар с Bybit"""
     try:
         markets = exchange.load_markets()
-        return [
+        # Фильтруем только активные USDT пары (например, BTC/USDT:USDT)
+        symbols = [
             market['symbol'] for market in markets.values()
             if market['linear'] and market['active'] and market['settle'] == 'USDT'
         ]
+        return symbols
     except Exception as e:
-        print(f"Ошибка получения монет: {e}")
+        print(f"Ошибка получения монет Bybit: {e}")
         return []
 
 def get_market_data(symbol, timeframe):
     try:
+        # Запрашиваем свечи с Bybit
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=60)
         if not ohlcv or len(ohlcv) < 30:
             return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Считаем индикаторы нашими функциями
+        # Расчет индикаторов
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['atr'] = calculate_atr(df, period=14)
         return df
@@ -93,8 +72,10 @@ def get_market_data(symbol, timeframe):
         return None
 
 def check_signals():
-    print("🚀 Начинаю сканирование рынка...")
+    print("🚀 Начинаю сканирование фьючерсного рынка Bybit...")
     symbols = get_all_futures_symbols()
+    print(f"Найдено монет на Bybit: {len(symbols)}")
+    
     for symbol in symbols:
         df = get_market_data(symbol, TIMEFRAME)
         if df is None or df.empty or 'rsi' not in df or 'atr' not in df:
@@ -108,12 +89,16 @@ def check_signals():
         if pd.isna(rsi_value) or pd.isna(atr_value) or atr_value <= 0:
             continue
 
+        # Форматируем отображение имени монеты (убираем двоеточие :USDT, если оно есть)
+        display_symbol = symbol.split(':')[0]
+
+        # 🟢 LONG Сигнал
         if rsi_value <= 28:
             stop_loss = current_price - (atr_value * 1.5)
             take_profit = current_price + (atr_value * 3.0)
             message = (
-                f"🟢 **СИГНАЛ: LONG (ПОКУПКА)** 🟢\n\n"
-                f"🪙 Монета: `{symbol}`\n"
+                f"🟢 **СИГНАЛ Bybit: LONG (ПОКУПКА)** 🟢\n\n"
+                f"🪙 Монета: `{display_symbol}`\n"
                 f"💵 Цена входа: `{current_price}`\n"
                 f"📊 RSI: {rsi_value:.2f}\n\n"
                 f"🛑 Stop Loss: `{stop_loss:.4f}`\n"
@@ -121,16 +106,17 @@ def check_signals():
             )
             try:
                 bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-                time.sleep(1)
+                time.sleep(1)  # Защита от спама в Telegram
             except:
                 pass
                 
+        # 🔴 SHORT Сигнал
         elif rsi_value >= 72:
             stop_loss = current_price + (atr_value * 1.5)
             take_profit = current_price - (atr_value * 3.0)
             message = (
-                f"🔴 **СИГНАЛ: SHORT (ПРОДАЖА)** 🔴\n\n"
-                f"🪙 Монета: `{symbol}`\n"
+                f"🔴 **СИГНАЛ Bybit: SHORT (ПРОДАЖА)** 🔴\n\n"
+                f"🪙 Монета: `{display_symbol}`\n"
                 f"💵 Цена входа: `{current_price}`\n"
                 f"📊 RSI: {rsi_value:.2f}\n\n"
                 f"🛑 Stop Loss: `{stop_loss:.4f}`\n"
@@ -143,16 +129,17 @@ def check_signals():
                 pass
 
 def bot_loop():
-    print("🤖 Поток сканера запущен успешно.")
+    print("🤖 Поток фонового сканера запущен.")
     while True:
         try:
             check_signals()
-            print("💤 Ожидание следующего цикла...")
-            time.sleep(600)
+            print("💤 Ожидание следующего цикла сканирования...")
+            time.sleep(600)  # Пауза 10 минут между циклами
         except Exception as e:
             print(f"Ошибка в цикле: {e}")
             time.sleep(60)
 
+# Запуск параллельного потока сканирования рынка
 threading.Thread(target=bot_loop, daemon=True).start()
 
 if __name__ == "__main__":
