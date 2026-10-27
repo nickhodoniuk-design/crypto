@@ -16,7 +16,7 @@ from aiogram.types import (
 import yt_dlp
 
 # ================= КОНФІГУРАЦІЯ =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "СЮДИ_ТОКЕН_ЯКЩО_НЕ_В_ENVIRONMENT")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
 PORT = int(os.getenv("PORT", 8080))
 
 # ================= РЕКЛАМНИЙ БЛОК (СПОНСОР) =================
