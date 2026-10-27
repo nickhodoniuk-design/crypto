@@ -6,8 +6,8 @@ import ccxt
 import pandas as pd
 
 # === НАСТРОЙКИ BOT / TELEGRAM ===
-TELEGRAM_TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
-CHAT_ID = "7810123995"
+TELEGRAM_TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
+CHAT_ID = "ВАШ_ЧАТ_ИД"
 TIMEFRAME = '15m'  # Таймфрейм (15 минут)
 # ================================
 
@@ -46,7 +46,6 @@ def get_all_futures_symbols():
     """Получение всех активных фьючерсных пар с Bybit"""
     try:
         markets = exchange.load_markets()
-        # Фильтруем только активные USDT пары (например, BTC/USDT:USDT)
         symbols = [
             market['symbol'] for market in markets.values()
             if market['linear'] and market['active'] and market['settle'] == 'USDT'
@@ -58,13 +57,11 @@ def get_all_futures_symbols():
 
 def get_market_data(symbol, timeframe):
     try:
-        # Запрашиваем свечи с Bybit
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=60)
         if not ohlcv or len(ohlcv) < 30:
             return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Расчет индикаторов
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['atr'] = calculate_atr(df, period=14)
         return df
@@ -89,7 +86,7 @@ def check_signals():
         if pd.isna(rsi_value) or pd.isna(atr_value) or atr_value <= 0:
             continue
 
-        # Форматируем отображение имени монеты (убираем двоеточие :USDT, если оно есть)
+        # Форматируем отображение имени монеты (делаем из BTC/USDT:USDT просто BTC/USDT)
         display_symbol = symbol.split(':')[0]
 
         # 🟢 LONG Сигнал
@@ -106,7 +103,7 @@ def check_signals():
             )
             try:
                 bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-                time.sleep(1)  # Защита от спама в Telegram
+                time.sleep(1)
             except:
                 pass
                 
@@ -134,7 +131,7 @@ def bot_loop():
         try:
             check_signals()
             print("💤 Ожидание следующего цикла сканирования...")
-            time.sleep(600)  # Пауза 10 минут между циклами
+            time.sleep(600)
         except Exception as e:
             print(f"Ошибка в цикле: {e}")
             time.sleep(60)
