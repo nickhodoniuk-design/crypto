@@ -1,6 +1,9 @@
 import os
+import json
 import asyncio
 import logging
+from datetime import datetime, timedelta
+import pytz
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -11,272 +14,311 @@ from aiogram.types import (
     InlineKeyboardButton, 
     CallbackQuery
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from groq import AsyncGroq
+import aiosqlite
 
+# ================= КОНФІГУРАЦІЯ =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
 PORT = int(os.getenv("PORT", 8080))
+
+KYIV_TZ = pytz.timezone("Europe/Kyiv")
+DB_NAME = "reminders.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# Надійні тестові питання зі стабільними картинками знаків
-QUESTIONS = [
-    {
-        "id": 1,
-        "image": "https://i.ibb.co/2kscs8v/roundabout.png",  # Круговий рух
-        "question": "Хто має перевагу в русі під час проїзду перехрестя з круговим рухом?",
-        "options": [
-            "1. Той, хто заїжджає на кільце (перешкода праворуч)",
-            "2. Той, хто вже рухається по колу",
-            "3. Водій вантажного автомобіля",
-            "4. Той, у кого більша швидкість"
-        ],
-        "correct": 1,
-        "explanation": "📖 <b>Пункт 16.12 ПДР:</b> Перевага в русі на перехрестях, де організовано круговий рух, завжди належить транспортним засобам, які вже рухаються по колу!"
-    },
-    {
-        "id": 2,
-        "image": "https://i.ibb.co/L6V2YvW/yield-sign.png",  # Знак 2.1
-        "question": "Що вимагає від водія знак 2.1 «Дати дорогу»?",
-        "options": [
-            "1. Обов'язково повністю зупинити автомобіль",
-            "2. Дати дорогу транспортним засобам на головній дорозі",
-            "3. Подати звуковий сигнал перед перехрестям",
-            "4. Збільшити швидкість"
-        ],
-        "correct": 1,
-        "explanation": "📖 <b>Знак 2.1 «Дати дорогу»:</b> Водій повинен дати дорогу ТЗ, що рухаються по головній дорозі. Повна зупинка обов'язкова лише у разі потреби пропустити авто."
-    }
-]
 
+# ================= БАЗА ДАНИХ =================
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                title TEXT,
+                category TEXT,
+                trigger_time TEXT,
+                repeat_type TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+        await db.commit()
+
+
+# ================= СТАНИ FSM =================
+class ReminderForm(StatesGroup):
+    waiting_for_text = State()
+
+
+# ================= ГОЛОВНЕ МЕНЮ =================
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🚦 Пройти тест ПДР"), KeyboardButton(text="🚨 Зупинила поліція")],
-            [KeyboardButton(text="📖 Штрафи та Довідник"), KeyboardButton(text="⭐️ PRO-режим (Іспит МВС)")]
+            [KeyboardButton(text="➕ Створити нагадування"), KeyboardButton(text="📋 Мої нагадування")],
+            [KeyboardButton(text="🎂 Дні народження"), KeyboardButton(text="🚗 Авто & ТО")],
+            [KeyboardButton(text="💡 Комуналка & Рахунки")]
         ],
         resize_keyboard=True
     )
 
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    welcome_text = (
-        f"👋 Вітаємо, <b>{message.from_user.first_name}</b>!\n\n"
-        "Це ваш персональний кишеньковий помічник водія України 🚗🇺🇦\n\n"
-        "Оберіть потрібний розділ у меню нижче:\n"
-        "• <b>🚦 Пройти тест ПДР</b> — тренування на офіційних схемах\n"
-        "• <b>🚨 Зупинила поліція</b> — права водія та покрокові інструкції\n"
-        "• <b>📖 Штрафи</b> — актуальні суми та статті законів\n"
-        "• <b>⭐️ PRO-режим</b> — симулятор справжнього іспиту МВС"
+    await init_db()
+    text = (
+        f"👋 Привіт, <b>{message.from_user.first_name}</b>!\n\n"
+        "Я твій розумний персональний помічник-нагадувальник 🧠\n\n"
+        "Я розумію <b>звичайну людську мову</b>. Ти можеш просто написати мені:\n"
+        "• <i>«Завтра о 15:00 забрати посилку»</i>\n"
+        "• <i>«1 числа щомісяця передати показники світла о 09:00»</i>\n"
+        "• <i>«18 серпня день народження у брата, нагадувати щороку»</i>\n"
+        "• <i>«Заміна мастила через 5 місяців»</i>\n\n"
+        "Обери категорію нижче або просто напиши повідомлення!"
     )
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 
-# ================= 1. ТЕСТИ ПДР (З ГНУЧКИМ ПОШУКОМ) =================
-@dp.message(F.text.lower().contains("тест"))
-async def start_quiz(message: types.Message):
-    q = QUESTIONS[0]
-    buttons = [
-        [InlineKeyboardButton(text=f"Варіант {idx+1}", callback_data=f"ans_{q['id']}_{idx}")]
-        for idx in range(len(q["options"]))
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+# ================= ШІ-ПАРСИНГ ЗВИЧАЙНОЇ МОВИ =================
+async def parse_reminder_with_ai(user_text: str) -> dict | None:
+    now = datetime.now(KYIV_TZ)
+    current_time_str = now.strftime("%Y-%m-%d %H:%M (%A)")
 
-    options_text = "\n".join(q["options"])
-    caption = (
-        f"❓ <b>Питання №{q['id']}:</b>\n\n"
-        f"{q['question']}\n\n"
-        f"<b>Варіанти відповідей:</b>\n{options_text}"
-    )
-
-    try:
-        # Пробуємо надіслати з картинкою
-        await message.answer_photo(
-            photo=q["image"],
-            caption=caption,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.warning(f"Не вдалося завантажити фото, шлемо текстом: {e}")
-        # Якщо картинка не відкрилася сервером Telegram — гарантовано шлемо текстом
-        await message.answer(caption, reply_markup=keyboard, parse_mode="HTML")
-
-@dp.callback_query(F.data.startswith("ans_"))
-async def handle_answer(call: CallbackQuery):
-    _, q_id, chosen_idx = call.data.split("_")
-    q_id = int(q_id)
-    chosen_idx = int(chosen_idx)
-
-    question_data = next((q for q in QUESTIONS if q["id"] == q_id), None)
-    if not question_data:
-        await call.answer()
-        return
-
-    if chosen_idx == question_data["correct"]:
-        result_text = "✅ <b>ПРАВИЛЬНО! Відмінна робота!</b>\n\n"
-    else:
-        result_text = f"❌ <b>НЕПРАВИЛЬНО!</b> Ви обрали варіант {chosen_idx+1}.\n\n"
-
-    result_text += question_data["explanation"]
-
-    next_btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➡️ Наступне питання", callback_data="next_question")]
-    ])
+    prompt = f"""
+    Ти — точний парсер нагадувань. Твоя задача — отримати людський текст українською та витягти з нього дату, час і суть нагадування.
     
-    await call.message.answer(result_text, reply_markup=next_btn, parse_mode="HTML")
-    await call.answer()
-
-@dp.callback_query(F.data == "next_question")
-async def next_question(call: CallbackQuery):
-    q = QUESTIONS[1]
-    buttons = [
-        [InlineKeyboardButton(text=f"Варіант {idx+1}", callback_data=f"ans_{q['id']}_{idx}")]
-        for idx in range(len(q["options"]))
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    options_text = "\n".join(q["options"])
-    caption = (
-        f"❓ <b>Питання №{q['id']}:</b>\n\n"
-        f"{q['question']}\n\n"
-        f"<b>Варіанти відповідей:</b>\n{options_text}"
-    )
+    Поточний точний час і дата зараз в Україні: {current_time_str}.
+    
+    Текст користувача: "{user_text}"
+    
+    ПРАВИЛА РОЗРАХУНКУ:
+    1. Якщо рік не вказано, а дата вже минула в цьому році — бери наступний рік.
+    2. Якщо час не вказано, став за замовчуванням 09:00 ранку.
+    3. Типи повторення:
+       - "none" (разове)
+       - "monthly" (щомісяця, наприклад комуналка)
+       - "yearly" (щороку, наприклад дні народження, свята)
+       - "daily" (щодня)
+    4. Категорії: "birthday", "car", "utility", "general".
+    
+    ВІДПОВІДЬ НАДАЙ ВИКЛЮЧНО У ФОРМАТІ ЧИСТОГО JSON БЕЗ ЗАЙВИХ СЛІВ І БЕЗ БЛОКІВ КОДУ:
+    {{
+        "title": "Коротка суть нагадування",
+        "datetime": "YYYY-MM-DD HH:MM",
+        "repeat": "none|monthly|yearly|daily",
+        "category": "birthday|car|utility|general"
+    }}
+    """
 
     try:
-        await call.message.answer_photo(
-            photo=q["image"],
-            caption=caption,
-            reply_markup=keyboard,
-            parse_mode="HTML"
+        response = await groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=200
         )
-    except Exception:
-        await call.message.answer(caption, reply_markup=keyboard, parse_mode="HTML")
-    await call.answer()
+        content = response.choices[0].message.content.strip()
+        # Очищуємо від можливих markdown-лапок
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        return json.loads(content.strip())
+    except Exception as e:
+        logging.error(f"Помилка парсингу ШІ: {e}")
+        return None
 
 
-# ================= 2. ЗУПИНИЛА ПОЛІЦІЯ =================
-def get_police_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 10 законних причин зупинки (ст. 35)", callback_data="police_reasons")],
-        [InlineKeyboardButton(text="🍷 Тест на алкоголь / Драгер (Інструкція)", callback_data="police_drager")],
-        [InlineKeyboardButton(text="🔍 Огляд авто чи Обшук? Ваші права", callback_data="police_search")],
-        [InlineKeyboardButton(text="✍️ Що писати в протоколі при незгоді", callback_data="police_protocol")]
-    ])
-
-@dp.message(F.text.lower().contains("поліція"))
-async def show_police_menu(message: types.Message):
-    text = (
-        "🚨 <b>Вас зупинив екіпаж патрульної поліції?</b>\n\n"
-        "Зберігайте спокій, не виходьте з авто без законної вимоги і не віддавайте документи в руки — ви маєте право лише <b>пред'явити</b> їх (зокрема в «Дії»).\n\n"
-        "Оберіть тему, яка вас цікавить прямо зараз:"
-    )
-    await message.answer(text, reply_markup=get_police_menu(), parse_mode="HTML")
-
-@dp.callback_query(F.data == "police_reasons")
-async def callback_police_reasons(call: CallbackQuery):
-    text = (
-        "🛑 <b>10 законних підстав зупинки авто (ст. 35 ЗУ «Про Нацполіцію»):</b>\n\n"
-        "1. Порушення правил дорожнього руху.\n"
-        "2. Очевидні ознаки технічної несправності авто.\n"
-        "3. Інформація про причетність до ДТП чи правопорушення.\n"
-        "4. Авто перебуває в розшуку.\n"
-        "5. Опитування водія/пасажирів як свідків ДТП.\n"
-        "6. Допомога іншим учасникам руху або поліцейським.\n"
-        "7. Небезпечне кріплення вантажу.\n"
-        "8. Порушення правил використання спецсигналів.\n"
-        "9. Рішення про обмеження руху.\n"
-        "10. Перевірка на блокпостах під час воєнного стану.\n\n"
-        "❗️ <i>«Просто перевірка документів» поза межами блокпостів є незаконною.</i>"
-    )
-    await call.message.answer(text, parse_mode="HTML")
-    await call.answer()
-
-@dp.callback_query(F.data == "police_drager")
-async def callback_police_drager(call: CallbackQuery):
-    text = (
-        "🍷 <b>Перевірка на алкоголь (Драгер):</b>\n\n"
-        "1. <b>Вимагайте сертифікат</b> та свідоцтво про повірку приладу.\n"
-        "2. Мундштук (трубка) має розпаковуватися <b>виключно у вашій присутності</b>.\n"
-        "3. <b>Обов'язкова умова:</b> процедура проводиться у присутності <b>2 свідків</b> АБО під безперервний відеозапис нагрудної бодікамери патрульного.\n"
-        "4. Якщо ви не згодні з цифрою Драгера — кажіть: <b>«З результатом не згоден, вимагаю огляду в медичному закладі»</b>.\n"
-        "5. Поліція зобов'язана доставити вас до найближчої лікарні протягом 2 годин."
-    )
-    await call.message.answer(text, parse_mode="HTML")
-    await call.answer()
-
-@dp.callback_query(F.data == "police_search")
-async def callback_police_search(call: CallbackQuery):
-    text = (
-        "🔍 <b>Поверхнева перевірка vs Обшук:</b>\n\n"
-        "• <b>Поверхнева перевірка (ст. 34 ЗУ «Про Нацполіцію»):</b>\n"
-        "Поліцейський має право лише <b>візуально оглянути</b> салон і багажник. При цьому водій <b>САМ</b> відкриває двері чи кришку багажника. Поліцейський НЕ має права торкатися ваших речей руками!\n\n"
-        "• <b>Обшук:</b>\n"
-        "Будь-яке порпання в речах — це обшук. Він дозволений лише на підставі ухвали слідчого судді або при затриманні за протоколом."
-    )
-    await call.message.answer(text, parse_mode="HTML")
-    await call.answer()
-
-@dp.callback_query(F.data == "police_protocol")
-async def callback_police_protocol(call: CallbackQuery):
-    text = (
-        "✍️ <b>Що писати в постанові/протоколі при незгоді:</b>\n\n"
-        "У графі для пояснень особи напишіть:\n\n"
-        "<code>«З постановою не згоден. Правил не порушував. Доказів вини інспектором не надано. Юридичної допомоги не забезпечено. Оскаржуватиму в суді.»</code>\n\n"
-        "У вас є <b>10 днів</b> на оскарження штрафу з дня винесення постанови."
-    )
-    await call.message.answer(text, parse_mode="HTML")
-    await call.answer()
-
-
-# ================= 3. ТАБЛИЦЯ ШТРАФІВ =================
-@dp.message(F.text.lower().contains("штраф") | F.text.lower().contains("довідник"))
-async def show_fines(message: types.Message):
-    fines_text = (
-        "📖 <b>Популярні штрафи за порушення ПДР в Україні:</b>\n\n"
-        "• <b>Непристебнутий ремінь / без шолома:</b> 510 грн\n"
-        "• <b>Розмова телефоном без hands-free:</b> 510 грн\n"
-        "• <b>Перевищення швидкості (20–50 км/год):</b> 340 грн\n"
-        "• <b>Перевищення швидкості (> 50 км/год):</b> 1 700 грн\n"
-        "• <b>Проїзд на червоне світло:</b> 510 грн\n"
-        "• <b>Ненадання переваги пішоходам:</b> 340 грн\n"
-        "• <b>Створення аварійної обстановки:</b> 1 445 грн або позбавлення прав на 6-12 міс.\n"
-        "• <b>Керування напідпитку (ст. 130 КУпАП):</b>\n"
-        "  1-й раз — <b>17 000 грн</b> + позбавлення прав на 1 рік.\n"
-        "  2-й раз — <b>34 000 грн</b> + позбавлення на 3 роки.\n\n"
-        "💡 <i>Підказка: якщо сплатити штраф за автофіксацію протягом 10 днів — діє знижка 50%!</i>"
-    )
-    await message.answer(fines_text, parse_mode="HTML")
-
-
-# ================= 4. PRO-РЕЖИМ (ГНУЧКИЙ ФІЛЬТР) =================
-@dp.message(F.text.lower().contains("pro") | F.text.lower().contains("про"))
-async def show_pro(message: types.Message):
-    pro_text = (
-        "⭐️ <b>Преміум підготовка до іспиту в ТСЦ МВС:</b>\n\n"
-        "Звичайна підготовка займає місяці. PRO-режим гарантує складання з 1-ї спроби:\n\n"
-        "🎯 <b>Симулятор реального іспиту МВС:</b> 20 випадкових питань, таймер 20 хвилин, максимум 2 помилки.\n"
-        "🧠 <b>Розумна робота над помилками:</b> бот запам'ятовує питання, де ви збилися, і тренує вас лише по них.\n"
-        "💡 <b>ШІ-пояснення:</b> особистий віртуальний автоінструктор розбере будь-яке складне перехрестя.\n\n"
-        "💰 <b>Вартість повного доступу:</b> всього 99 грн (назавжди)!"
-    )
-    buy_btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Отримати PRO за 99 грн", callback_data="buy_pro")]
-    ])
-    await message.answer(pro_text, reply_markup=buy_btn, parse_mode="HTML")
-
-@dp.callback_query(F.data == "buy_pro")
-async def callback_buy_pro(call: CallbackQuery):
-    await call.message.answer(
-        "🚀 Тут підключається оплата через <b>Telegram Stars</b> або <b>Monobank</b>!\n\n"
-        "Користувач сплачує 99 грн — і бот автоматично відкриває необмежений доступ до екзаменатора.",
+# ================= ОБРОБКА ПОВІДОМЛЕНЬ =================
+@dp.message(F.text == "➕ Створити нагадування")
+async def ask_for_reminder(message: types.Message, state: FSMContext):
+    await message.answer(
+        "✍️ Напишіть мені будь-яке нагадування своїми словами.\n\n"
+        "<i>Наприклад:\n"
+        "• «Завтра о 10:00 зателефонувати юристу»\n"
+        "• «14 травня день народження мами»\n"
+        "• «Заміна мастила через 6 місяців»</i>",
         parse_mode="HTML"
     )
-    await call.answer()
+    await state.set_state(ReminderForm.waiting_for_text)
+
+
+# Швидкі шаблони
+@dp.message(F.text == "🎂 Дні народження")
+async def template_birthday(message: types.Message):
+    await message.answer(
+        "🎂 <b>Додавання дня народження:</b>\n\n"
+        "Напишіть, наприклад:\n"
+        "<code>День народження Андрія 25 вересня о 09:00</code>\n\n"
+        "<i>Я автоматично запам'ятаю дату і повторюватиму її щороку!</i>",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "🚗 Авто & ТО")
+async def template_car(message: types.Message):
+    await message.answer(
+        "🚗 <b>Автомобільні нагадування:</b>\n\n"
+        "Напишіть будь-що, наприклад:\n"
+        "• <code>Заміна мастила та фільтрів через 6 місяців</code>\n"
+        "• <code>Закінчується автоцивілка 1 грудня</code>\n"
+        "• <code>Перевзути зимову гуму 15 листопада</code>",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "💡 Комуналка & Рахунки")
+async def template_utility(message: types.Message):
+    await message.answer(
+        "💡 <b>Комуналка та щомісячні рахунки:</b>\n\n"
+        "Напишіть, наприклад:\n"
+        "• <code>1 числа щомісяця о 09:00 передати показники газу і води</code>\n"
+        "• <code>18 числа щомісяця сплатити комунальні послуги</code>\n"
+        "• <code>Оплата інтернету 25 числа щомісяця</code>",
+        parse_mode="HTML"
+    )
+
+
+# Універсальний обробник тексту (працює завжди, коли користувач щось пише)
+@dp.message(F.text & ~F.text.startswith("/"))
+async def process_reminder_text(message: types.Message, state: FSMContext):
+    if message.text in ["➕ Створити нагадування", "📋 Мої нагадування", "🎂 Дні народження", "🚗 Авто & ТО", "💡 Комуналка & Рахунки"]:
+        return
+
+    wait_msg = await message.answer("⏳ Аналізую дату і час...")
+    data = await parse_reminder_with_ai(message.text)
+
+    if not data or "datetime" not in data or "title" not in data:
+        await wait_msg.edit_text(
+            "❌ Не вдалося розпізнати точну дату або час.\n"
+            "Спробуйте написати чіткіше, наприклад: <i>«Завтра о 14:00 зустріч»</i> або <i>«1 травня о 09:00 день народження»</i>.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Зберігаємо в базу даних
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            INSERT INTO reminders (user_id, title, category, trigger_time, repeat_type)
+            VALUES (?, ?, ?, ?, ?)
+        """, (message.from_user.id, data["title"], data.get("category", "general"), data["datetime"], data.get("repeat", "none")))
+        await db.commit()
+
+    repeat_labels = {
+        "none": "Один раз",
+        "daily": "Щодня",
+        "monthly": "Щомісяця",
+        "yearly": "Щороку"
+    }
+
+    success_text = (
+        "✅ <b>Нагадування успішно створено!</b>\n\n"
+        f"📌 <b>Суть:</b> {data['title']}\n"
+        f"📅 <b>Коли:</b> {data['datetime']}\n"
+        f"🔁 <b>Повторення:</b> {repeat_labels.get(data.get('repeat', 'none'), 'Немає')}\n\n"
+        "<i>Я надішлю вам повідомлення у вказаний момент!</i>"
+    )
+    await wait_msg.edit_text(success_text, parse_mode="HTML")
+    await state.clear()
+
+
+# ================= ПЕРЕГЛЯД ТА ВИДАЛЕННЯ =================
+@dp.message(F.text == "📋 Мої нагадування")
+async def list_reminders(message: types.Message):
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT id, title, trigger_time, repeat_type 
+            FROM reminders 
+            WHERE user_id = ? AND is_active = 1 
+            ORDER BY trigger_time ASC
+        """, (message.from_user.id,))
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await message.answer("📭 У вас поки що немає активних нагадувань. Створіть перше!")
+        return
+
+    text = "📋 <b>Ваші активні нагадування:</b>\n\n"
+    buttons = []
+    for r_id, title, trig_time, repeat in rows:
+        repeat_mark = "🔁" if repeat != "none" else "⏳"
+        text += f"• <b>{trig_time}</b>: {title} ({repeat_mark})\n"
+        buttons.append([InlineKeyboardButton(text=f"❌ Видалити: {title[:20]}", callback_data=f"del_{r_id}")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_reminder(call: CallbackQuery):
+    r_id = int(call.data.split("_")[1])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE reminders SET is_active = 0 WHERE id = ? AND user_id = ?", (r_id, call.from_user.id))
+        await db.commit()
+    
+    await call.answer("Видалено!")
+    await call.message.edit_text("✅ Нагадування видалено.")
+
+
+# ================= ФОНОВИЙ ПЕРЕВІРНИК ТА СПОВІЩУВАЧ =================
+async def reminder_scheduler():
+    while True:
+        try:
+            now_str = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M")
+            async with aiosqlite.connect(DB_NAME) as db:
+                cursor = await db.execute("""
+                    SELECT id, user_id, title, trigger_time, repeat_type 
+                    FROM reminders 
+                    WHERE trigger_time <= ? AND is_active = 1
+                """, (now_str,))
+                due_reminders = await cursor.fetchall()
+
+                for r_id, u_id, title, trig_time, repeat in due_reminders:
+                    # Надсилаємо нагадування користувачу
+                    try:
+                        alert_text = (
+                            "🔔 <b>НАГАДУВАННЯ!</b>\n\n"
+                            f"📌 <b>{title}</b>\n\n"
+                            f"<i>Час: {trig_time}</i>"
+                        )
+                        await bot.send_message(chat_id=u_id, text=alert_text, parse_mode="HTML")
+                    except Exception as e:
+                        logging.error(f"Помилка відправки користувачу {u_id}: {e}")
+
+                    # Обробляємо повторення
+                    if repeat == "none":
+                        await db.execute("UPDATE reminders SET is_active = 0 WHERE id = ?", (r_id,))
+                    else:
+                        dt = datetime.strptime(trig_time, "%Y-%m-%d %H:%M")
+                        if repeat == "daily":
+                            next_dt = dt + timedelta(days=1)
+                        elif repeat == "monthly":
+                            # Переносимо на 30 днів вперед
+                            next_dt = dt + timedelta(days=30)
+                        elif repeat == "yearly":
+                            # Переносимо на наступний рік
+                            next_dt = dt.replace(year=dt.year + 1)
+                        else:
+                            next_dt = dt
+
+                        next_time_str = next_dt.strftime("%Y-%m-%d %H:%M")
+                        await db.execute("UPDATE reminders SET trigger_time = ? WHERE id = ?", (next_time_str, r_id))
+
+                await db.commit()
+
+        except Exception as e:
+            logging.error(f"Помилка в планувальнику: {e}")
+
+        # Перевіряємо щохвилини
+        await asyncio.sleep(40)
 
 
 # ================= ВЕБСЕРВЕР ДЛЯ RENDER =================
 async def handle_ping(request):
-    return web.Response(text="PDR Ukraine Bot is Running!")
+    return web.Response(text="Smart Reminder Bot is running!")
 
 async def start_web_server():
     app = web.Application()
@@ -285,11 +327,13 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info(f"Вебсервер активний на порті {PORT}")
+    logging.info(f"Вебсервер запущено на порті {PORT}")
 
 async def main():
+    await init_db()
     await asyncio.gather(
         start_web_server(),
+        reminder_scheduler(),
         dp.start_polling(bot)
     )
 
