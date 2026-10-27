@@ -29,7 +29,7 @@ def run_health_server():
 def get_all_usdt_pairs():
     try:
         # ОФІЦІЙНИЙ СЕРВЕР ДАНИХ ДЛЯ РОЗРОБНИКІВ
-        response = requests.get("https://binance.vision", timeout=10).json()
+        response = requests.get("api.binance.vision", timeout=10).json()
         return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
     except Exception as e:
         try:
@@ -45,7 +45,7 @@ async def check_crypto():
     print("Бот успішно запустився в хмарі.")
     
     clean_token = TOKEN.replace('bot', '')
-    telegram_url = f"https://telegram.org{clean_token}/sendMessage"
+    telegram_url = f"api.telegram.org{clean_token}/sendMessage"
     
     LAST_PRICES = get_all_usdt_pairs()
     if LAST_PRICES:
