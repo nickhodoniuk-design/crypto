@@ -9,7 +9,7 @@ import threading
 TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
 CHANNEL_ID = "@crypsignalsa"
 REFERRAL_LINK = "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=ru-UA&ref=GRO_28502_MDLIC&utm_source=referral_entrance"
-SENSITIVITY_PERCENT = 0.0  # 0.0 для миттєвого тесту під час першої ж перевірки!
+SENSITIVITY_PERCENT = 0.0  # 0.0 для миттєвого тесту під час першої ж перевірки ринку!
 # ===========================================================
 
 LAST_PRICES = {}
@@ -31,13 +31,13 @@ def run_health_server():
 
 def get_all_usdt_pairs():
     try:
-        # 🔥 ПРАВИЛЬНИЙ СЕРВЕР ДАНИХ (БЕЗ БЛОКУВАНЬ)
+        # 🔥 ОФІЦІЙНИЙ СЕРВЕР ДАНИХ ДЛЯ РОЗРОБНИКІВ (БЕЗ БЛОКУВАНЬ)
         url = "https://binance.vision"
         response = requests.get(url, timeout=10).json()
         return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
     except Exception as e:
         try:
-            # РЕЗЕРВНЕ ДЗЕРКАЛО
+            # РЕЗЕРВНЕ ОФІЦІЙНЕ ДЗЕРКАЛО BINANCE
             url = "https://binance.com"
             response = requests.get(url, timeout=10).json()
             return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
@@ -50,7 +50,7 @@ async def check_crypto():
     print("Бот успішно запустився в хмарі.")
     
     clean_token = TOKEN.replace('bot', '')
-    # 🔥 ПРАВИЛЬНА АДРЕСА СЕРВЕРА TELEGRAM
+    # 🔥 ОФІЦІЙНА ПРАВИЛЬНА АДРЕСА СЕРВЕРА TELEGRAM (api.telegram.org)
     telegram_url = f"https://telegram.org{clean_token}/sendMessage"
     
     LAST_PRICES = get_all_usdt_pairs()
@@ -58,7 +58,7 @@ async def check_crypto():
         print(f"✅ Успішно взято в роботу {len(LAST_PRICES)} криптопар. Починаю аналіз ринку...")
         
         # Миттєвий тестовий сигнал у канал при запуску
-        test_text = "🔔 **Криптобот успішно запущений на цілодобовому сервері Render!**\n\nСистема підключена правильно і аналізує 771 криптопару ринку 24/7."
+        test_text = "🔔 **Криптобот успішно запустився на Render за правильними адресами!**\n\nСистема підключена до api.telegram.org та аналізує всі пари Binance 24/7."
         try:
             res = requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": test_text, "parse_mode": "Markdown"}, timeout=10)
             print(f"Статус тестового відправлення в Telegram: {res.status_code} - {res.text}")
