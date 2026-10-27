@@ -19,7 +19,7 @@ import yt_dlp
 # ================= 1. ТОКЕН ТА НАЛАШТУВАННЯ =================
 # Якщо токен додано в Render у вкладці Environment — він підтягнеться сам.
 # Якщо ні — вставте свій токен замість тексту в других лапках:
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "СЮДИ_ТОКЕН_ЯКЩО_НЕ_В_ENVIRONMENT")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
 PORT = int(os.getenv("PORT", 8080))
 
 # ================= 2. РЕКЛАМНИЙ БЛОК =================
