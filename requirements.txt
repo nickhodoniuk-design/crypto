@@ -1,5 +1,4 @@
-pyTelegramBotAPI
-ccxt
-pandas
-Flask
-gunicorn
+aiogram
+feedparser
+groq
+aiosqlite
