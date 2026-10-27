@@ -20,8 +20,15 @@ def home():
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 exchange = ccxt.binance({
     'options': {'defaultType': 'future'},
-    'enableRateLimit': True
+    'enableRateLimit': True,
+    'urls': {
+        'api': {
+            'public': 'https://binance.com',
+            'private': 'https://binance.com',
+        }
+    }
 })
+
 
 def calculate_rsi(series, period=14):
     """Ручной расчет RSI без сторонних библиотек"""
