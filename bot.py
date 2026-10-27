@@ -4,7 +4,6 @@ from flask import Flask
 import telebot
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 
 # === НАСТРОЙКИ BOT / TELEGRAM ===
 TELEGRAM_TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
@@ -12,7 +11,6 @@ CHAT_ID = "ВАШ_ЧАТ_ИД"
 TIMEFRAME = '15m'
 # ================================
 
-# Инициализация Flask веб-сервера для Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -24,6 +22,23 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'future'},
     'enableRateLimit': True
 })
+
+def calculate_rsi(series, period=14):
+    """Ручной расчет RSI без сторонних библиотек"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_atr(df, period=14):
+    """Ручной расчет ATR без сторонних библиотек"""
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    return true_range.rolling(window=period).mean()
 
 def get_all_futures_symbols():
     try:
@@ -42,8 +57,10 @@ def get_market_data(symbol, timeframe):
         if not ohlcv or len(ohlcv) < 30:
             return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        
+        # Считаем индикаторы нашими функциями
+        df['rsi'] = calculate_rsi(df['close'], period=14)
+        df['atr'] = calculate_atr(df, period=14)
         return df
     except Exception as e:
         return None
@@ -99,7 +116,6 @@ def check_signals():
                 pass
 
 def bot_loop():
-    """Функция вечного цикла сканера рисков в отдельном потоке"""
     print("🤖 Поток сканера запущен успешно.")
     while True:
         try:
@@ -110,10 +126,7 @@ def bot_loop():
             print(f"Ошибка в цикле: {e}")
             time.sleep(60)
 
-# Запуск сканирования рынка в отдельном фоновом потоке
 threading.Thread(target=bot_loop, daemon=True).start()
 
-# Основной поток Flask сервера для Render
 if __name__ == "__main__":
-    # Локально запускается на порту 5000, Render сам подставит нужный порт
     app.run(host='0.0.0.0', port=5000)
