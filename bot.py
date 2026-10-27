@@ -1,143 +1,141 @@
-import time
-import threading
-from flask import Flask
-import telebot
-import ccxt
-import pandas as pd
+import asyncio
+import logging
+import feedparser
+import aiosqlite
+from aiogram import Bot
+from groq import AsyncGroq
 
-# === НАСТРОЙКИ BOT / TELEGRAM ===
-TELEGRAM_TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
-CHAT_ID = " 7810123995"
-TIMEFRAME = '15m'  # Таймфрейм (15 минут)
-# ================================
+# ================= НАЛАШТУВАННЯ (0 ГРИВЕНЬ) =================
+# 1. Твій токен від BotFather
+TELEGRAM_BOT_TOKEN = "СЮДИ_ВСТАВ_ТОКЕН_ВІД_BOTFATHER"
 
-app = Flask(__name__)
+# 2. Твій канал (юзернейм типу "@my_channel" або ID)
+CHANNEL_ID = "@СЮДИ_НАЗВУ_КАНАЛУ"
 
-@app.route('/')
-def home():
-    return "Бот Bybit работает в фоновом режиме!", 200
+# 3. Безкоштовний ключ від Groq (починається на gsk_...)
+GROQ_API_KEY = "СЮДИ_ВСТАВ_GROQ_КЛЮЧ"
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+# RSS-стрічки новин (можеш міняти на будь-які українські сайти)
+RSS_FEEDS = [
+    "https://mezha.media/feed/",   # Новини технологій та гаджетів
+    "https://itc.ua/ua/feed/",     # IT та техніка
+]
 
-# Инициализируем биржу Bybit для работы с фьючерсами USDT
-exchange = ccxt.bybit({
-    'options': {'defaultType': 'linear'},  # Линейные фьючерсы (USDT)
-    'enableRateLimit': True
-})
+# Пауза між публікаціями: 1800 сек = 30 хвилин (можеш змінити, наприклад, на 3600 = 1 година)
+CHECK_INTERVAL_SECONDS = 1800 
 
-def calculate_rsi(series, period=14):
-    """Ручной расчет RSI"""
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+DATABASE_NAME = "news_history.db"
+# ==========================================================
 
-def calculate_atr(df, period=14):
-    """Ручной расчет ATR"""
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(window=period).mean()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-def get_all_futures_symbols():
-    """Получение всех активных фьючерсных пар с Bybit"""
-    try:
-        markets = exchange.load_markets()
-        symbols = [
-            market['symbol'] for market in markets.values()
-            if market['linear'] and market['active'] and market['settle'] == 'USDT'
-        ]
-        return symbols
-    except Exception as e:
-        print(f"Ошибка получения монет Bybit: {e}")
-        return []
 
-def get_market_data(symbol, timeframe):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=60)
-        if not ohlcv or len(ohlcv) < 30:
-            return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df['rsi'] = calculate_rsi(df['close'], period=14)
-        df['atr'] = calculate_atr(df, period=14)
-        return df
-    except Exception as e:
-        return None
+# Створення локальної бази даних для пам'яті новин
+async def init_db():
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS posted_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url_hash TEXT UNIQUE
+            )
+        """)
+        await db.commit()
 
-def check_signals():
-    print("🚀 Начинаю сканирование фьючерсного рынка Bybit...")
-    symbols = get_all_futures_symbols()
-    print(f"Найдено монет на Bybit: {len(symbols)}")
+
+async def is_news_posted(url: str) -> bool:
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        cursor = await db.execute("SELECT 1 FROM posted_news WHERE url_hash = ?", (url,))
+        result = await cursor.fetchone()
+        return result is not None
+
+
+async def mark_news_as_posted(url: str):
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO posted_news (url_hash) VALUES (?)", (url,))
+        await db.commit()
+
+
+# Безкоштовний ШІ-редактор на базі моделі Llama 3.3 від Meta
+async def rewrite_news(title: str, summary: str, link: str) -> str:
+    prompt = f"""
+    Ти — редактор крутого українського новинного каналу.
+    Зроби органічний, цікавий та лаконічний пост на основі новини.
     
-    for symbol in symbols:
-        df = get_market_data(symbol, TIMEFRAME)
-        if df is None or df.empty or 'rsi' not in df or 'atr' not in df:
-            continue
-            
-        last_row = df.iloc[-1]
-        current_price = float(last_row['close'])
-        rsi_value = float(last_row['rsi'])
-        atr_value = float(last_row['atr'])
-        
-        if pd.isna(rsi_value) or pd.isna(atr_value) or atr_value <= 0:
-            continue
+    Заголовок новини: {title}
+    Короткий опис: {summary}
+    Посилання: {link}
 
-        # Форматируем отображение имени монеты (делаем из BTC/USDT:USDT просто BTC/USDT)
-        display_symbol = symbol.split(':')[0]
+    Вимоги до поста:
+    1. Перший рядок: привабливий заголовок українською мовою з емодзі.
+    2. Порожній рядок.
+    3. Коротко суть (2-3 пункти через маркер •). Без клікбейту і "води".
+    4. В кінці окремим рядком: [Читати повністю]({link})
+    """
 
-        # 🟢 LONG Сигнал
-        if rsi_value <= 28:
-            stop_loss = current_price - (atr_value * 1.5)
-            take_profit = current_price + (atr_value * 3.0)
-            message = (
-                f"🟢 **СИГНАЛ Bybit: LONG (ПОКУПКА)** 🟢\n\n"
-                f"🪙 Монета: `{display_symbol}`\n"
-                f"💵 Цена входа: `{current_price}`\n"
-                f"📊 RSI: {rsi_value:.2f}\n\n"
-                f"🛑 Stop Loss: `{stop_loss:.4f}`\n"
-                f"💰 Take Profit: `{take_profit:.4f}`\n"
-            )
-            try:
-                bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-                time.sleep(1)
-            except:
-                pass
-                
-        # 🔴 SHORT Сигнал
-        elif rsi_value >= 72:
-            stop_loss = current_price + (atr_value * 1.5)
-            take_profit = current_price - (atr_value * 3.0)
-            message = (
-                f"🔴 **СИГНАЛ Bybit: SHORT (ПРОДАЖА)** 🔴\n\n"
-                f"🪙 Монета: `{display_symbol}`\n"
-                f"💵 Цена входа: `{current_price}`\n"
-                f"📊 RSI: {rsi_value:.2f}\n\n"
-                f"🛑 Stop Loss: `{stop_loss:.4f}`\n"
-                f"💰 Take Profit: `{take_profit:.4f}`\n"
-            )
-            try:
-                bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-                time.sleep(1)
-            except:
-                pass
+    response = await groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",  # Потужна і повністю безкоштовна модель
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6,
+        max_tokens=400,
+    )
+    return response.choices[0].message.content
 
-def bot_loop():
-    print("🤖 Поток фонового сканера запущен.")
+
+# Головний процес роботи
+async def news_worker():
     while True:
-        try:
-            check_signals()
-            print("💤 Ожидание следующего цикла сканирования...")
-            time.sleep(600)
-        except Exception as e:
-            print(f"Ошибка в цикле: {e}")
-            time.sleep(60)
+        logging.info("Перевіряю стрічки новин на наявність свіжого...")
+        posted_in_this_round = False
 
-# Запуск параллельного потока сканирования рынка
-threading.Thread(target=bot_loop, daemon=True).start()
+        for feed_url in RSS_FEEDS:
+            if posted_in_this_round:
+                break
+
+            parsed_feed = feedparser.parse(feed_url)
+
+            for entry in parsed_feed.entries:
+                link = entry.link
+                title = entry.title
+                summary = getattr(entry, "summary", "")
+
+                # Якщо новини ще не було в каналі
+                if not await is_news_posted(link):
+                    logging.info(f"Знайдено нову новину: {title}")
+
+                    try:
+                        # ШІ переписує пост
+                        post_text = await rewrite_news(title, summary, link)
+
+                        # Відправляємо в канал
+                        await bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=post_text,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=False
+                        )
+
+                        await mark_news_as_posted(link)
+                        logging.info("Пост успішно опубліковано в канал!")
+
+                        # Робимо паузу, щоб не постити 10 штук одночасно
+                        posted_in_this_round = True
+                        break
+
+                    except Exception as e:
+                        logging.error(f"Помилка при публікації: {e}")
+
+        logging.info(f"Чекаємо {CHECK_INTERVAL_SECONDS // 60} хвилин перед наступним постом...")
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+
+async def main():
+    await init_db()
+    logging.info("Бот запущений і працює!")
+    await news_worker()
+
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+    asyncio.run(main())
+    
