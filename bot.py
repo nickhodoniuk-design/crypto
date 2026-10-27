@@ -1,102 +1,148 @@
+python
 import asyncio
-import requests
-import time
+import logging
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ==================== НАЛАШТУВАННЯ БОТА ====================
-TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
-CHANNEL_ID = "@crypsignalsa"
+import requests
+
+# Налаштування через Environment Variables у Render
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@crypsignalsa")
 REFERRAL_LINK = "https://binance.com"
-SENSITIVITY_PERCENT = 0.0  # 0.0 для миттєвого тесту під час першої перевірки
-# ===========================================================
+SENSITIVITY_PERCENT = 0.5
+CHECK_INTERVAL = 300
 
+BINANCE_URL = "https://data-api.binance.vision/api/v3/ticker/price"
 LAST_PRICES = {}
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+session = requests.Session()
+
+
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(b"OK")
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    def log_message(self, *args):
+        pass
+
+
+def run_web():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
-def get_all_usdt_pairs():
-    try:
-        # ОФІЦІЙНИЙ СЕРВЕР ДАНИХ ДЛЯ РОЗРОБНИКІВ
-        response = requests.get("api.binance.vision", timeout=10).json()
-        return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
-    except Exception as e:
-        try:
-            # РЕЗЕРВНЕ ОФІЦІЙНЕ ДЗЕРКАЛО BINANCE
-            response = requests.get("https://binance.com", timeout=10).json()
-            return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
-        except Exception as e2:
-            print(f"Помилка збору цін з біржі: {e2}")
-            return {}
 
-async def check_crypto():
+def send_telegram(text):
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN не заданий!")
+
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
+    response = session.post(
+        url,
+        json={
+            "chat_id": CHANNEL_ID,
+            "text": text
+        },
+        timeout=15
+    )
+
+    response.raise_for_status()
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram API: {result}")
+
+    logging.info("Повідомлення успішно надіслано в Telegram")
+
+
+def get_prices():
+    response = session.get(BINANCE_URL, timeout=20)
+    response.raise_for_status()
+    data = response.json()
+
+    return {
+        item["symbol"]: float(item["price"])
+        for item in data
+        if item["symbol"].endswith("USDT")
+    }
+
+
+async def main():
     global LAST_PRICES
-    print("Бот успішно запустився в хмарі.")
-    
-    clean_token = TOKEN.replace('bot', '')
-    telegram_url = f"api.telegram.org{clean_token}/sendMessage"
-    
-    LAST_PRICES = get_all_usdt_pairs()
-    if LAST_PRICES:
-        print(f"✅ Успішно взято в роботу {len(LAST_PRICES)} криптопар. Починаю аналіз ринку...")
-        
-        test_text = "🔔 **Криптобот успішно запрацював на Render!**\n\nТепер усі технічні адреси правильні. Бот цілодобово сканує криптопари Binance."
-        try:
-            res = requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": test_text, "parse_mode": "Markdown"}, timeout=10)
-            print(f"Статус тестового відправлення в Telegram: {res.status_code} - {res.text}")
-        except Exception as err:
-            print(f"Помилка надсилання тесту: {err}")
-            
+
+    logging.info("Запуск криптобота...")
+
+    # Перевіряємо Telegram і доступ до каналу
+    await asyncio.to_thread(
+        send_telegram,
+        "🚀 Бот запущений! Перевірка Telegram успішна."
+    )
+
+    # Отримуємо початкові ціни
+    LAST_PRICES = await asyncio.to_thread(get_prices)
+    logging.info("Завантажено цін: %s", len(LAST_PRICES))
+
     while True:
-        await asyncio.sleep(300)  # Аналіз ринку кожні 5 хвилин
+        await asyncio.sleep(CHECK_INTERVAL)
+
         try:
-            current_prices = get_all_usdt_pairs()
-            if not current_prices:
-                continue
-                
-            for symbol, price in current_prices.items():
-                if symbol not in LAST_PRICES:
-                    LAST_PRICES[symbol] = price
+            current = await asyncio.to_thread(get_prices)
+
+            signals = []
+
+            for symbol, price in current.items():
+                old = LAST_PRICES.get(symbol)
+
+                if old is None or old <= 0:
                     continue
-                    
-                old_price = LAST_PRICES[symbol]
-                if old_price == 0:
-                    continue
-                    
-                change = ((price - old_price) / old_price) * 100
-                
+
+                change = ((price - old) / old) * 100
+
                 if abs(change) >= SENSITIVITY_PERCENT:
-                    coin_name = symbol.replace("USDT", " / USDT")
-                    direction = f"🟢 РІЗКИЙ РІСТ {coin_name}!" if change > 0 else f"🔴 РІЗКЕ ПАДІННЯ {coin_name}!"
-                    action = "📈 Рекомендація: LONG (Купівля)" if change > 0 else "📉 Рекомендація: SHORT (Продаж)"
-                        
-                    text = (
-                        f"{direction}\n\n"
-                        f"💵 Поточна ціна: {price:,.4f}\n"
-                        f"📊 Зміна за 5 хв: {change:+.2f}%\n\n"
-                        f"{action}\n\n"
-                        f"🔗 Торгувати з бонусами на Binance:\n{REFERRAL_LINK}\n\n"
-                        f"🕒 Час: {time.strftime('%H:%M:%S')}"
+                    name = symbol.removesuffix("USDT")
+
+                    signals.append(
+                        f"📊 {name}/USDT\n"
+                        f"Ціна: {price:.8g}\n"
+                        f"Зміна за 5 хв: {change:+.2f}%\n"
+                        f"🔗 {REFERRAL_LINK}"
                     )
-                    
-                    requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True}, timeout=10)
-            
-            LAST_PRICES = current_prices
-        except Exception as e:
-            print(f"Помилка в циклі: {e}")
+
+            # Оновлюємо ціни навіть тоді, коли сигналів немає
+            LAST_PRICES = current
+
+            logging.info(
+                "Перевірено %s пар; сигналів: %s",
+                len(current),
+                len(signals)
+            )
+
+            # Не надсилаємо сотні повідомлень окремо
+            for start in range(0, len(signals), 10):
+                batch = signals[start:start + 10]
+                message = "\n\n".join(batch)
+
+                await asyncio.to_thread(send_telegram, message)
+
+        except Exception:
+            logging.exception("Помилка під час перевірки цін")
+
 
 if __name__ == "__main__":
-    threading.Thread(target=run_health_server, daemon=True).start()
-    asyncio.run(check_crypto())
+    threading.Thread(target=run_web, daemon=True).start()
 
+    try:
+        asyncio.run(main())
+    except Exception:
+        logging.exception("Критична помилка бота")
+        raise
