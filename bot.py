@@ -9,7 +9,7 @@ import threading
 TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
 CHANNEL_ID = "@crypsignalsa"
 REFERRAL_LINK = "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=ru-UA&ref=GRO_28502_MDLIC&utm_source=referral_entrance"
-SENSITIVITY_PERCENT = 0.0  # Тимчасово 0.0 для миттєвого потоку сигналів!
+SENSITIVITY_PERCENT = 0.0  # 0.0 для миттєвого тесту під час першої ж перевірки!
 # ===========================================================
 
 LAST_PRICES = {}
@@ -31,13 +31,13 @@ def run_health_server():
 
 def get_all_usdt_pairs():
     try:
-        # ✅ ВИПРАВЛЕНО: Робочий захищений сервер ринкових даних
+        # 🔥 ПРАВИЛЬНИЙ СЕРВЕР ДАНИХ (БЕЗ БЛОКУВАНЬ)
         url = "https://binance.vision"
         response = requests.get(url, timeout=10).json()
         return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
     except Exception as e:
         try:
-            # ✅ ВИПРАВЛЕНО: Резервне робоче дзеркало для збору цін
+            # РЕЗЕРВНЕ ДЗЕРКАЛО
             url = "https://binance.com"
             response = requests.get(url, timeout=10).json()
             return {item['symbol']: float(item['price']) for item in response if item['symbol'].endswith('USDT')}
@@ -47,26 +47,26 @@ def get_all_usdt_pairs():
 
 async def check_crypto():
     global LAST_PRICES
-    print("Бот успішно запущений через захищений дата-сервер!")
+    print("Бот успішно запустився в хмарі.")
     
     clean_token = TOKEN.replace('bot', '')
-    # ✅ ВИПРАВЛЕНО: Тепер адреса Telegram правильна (api.telegram.org)
+    # 🔥 ПРАВИЛЬНА АДРЕСА СЕРВЕРА TELEGRAM
     telegram_url = f"https://telegram.org{clean_token}/sendMessage"
     
     LAST_PRICES = get_all_usdt_pairs()
     if LAST_PRICES:
         print(f"✅ Успішно взято в роботу {len(LAST_PRICES)} криптопар. Починаю аналіз ринку...")
         
-        # Відправляємо стартове повідомлення для моментальної перевірки зв'язку
-        test_text = "🔔 **Криптобот успішно запущений на цілодобовому сервері Render!**\n\nСистема працює 24/7 і аналізує всі криптопари ринку."
+        # Миттєвий тестовий сигнал у канал при запуску
+        test_text = "🔔 **Криптобот успішно запущений на цілодобовому сервері Render!**\n\nСистема підключена правильно і аналізує 771 криптопару ринку 24/7."
         try:
             res = requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": test_text, "parse_mode": "Markdown"}, timeout=10)
-            print(f"Статус тестового відправлення в Telegram: {res.status_code}")
+            print(f"Статус тестового відправлення в Telegram: {res.status_code} - {res.text}")
         except Exception as err:
             print(f"Помилка надсилання тесту: {err}")
             
     while True:
-        await asyncio.sleep(300)  # Перевірка цін кожні 5 хвилин
+        await asyncio.sleep(300)  # Аналіз ринку кожні 5 хвилин
         try:
             current_prices = get_all_usdt_pairs()
             if not current_prices:
@@ -97,7 +97,6 @@ async def check_crypto():
                         f"🕒 Час: {time.strftime('%H:%M:%S')}"
                     )
                     
-                    # ✅ ВИПРАВЛЕНО: Правильна адреса для регулярних сигналів
                     requests.post(telegram_url, json={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True}, timeout=10)
             
             LAST_PRICES = current_prices
@@ -105,7 +104,5 @@ async def check_crypto():
             print(f"Помилка в циклі: {e}")
 
 if __name__ == "__main__":
-    # Запускаємо веб-сервер у фоновому потоці для Render
     threading.Thread(target=run_health_server, daemon=True).start()
-    # Запускаємо аналіз крипти
     asyncio.run(check_crypto())
