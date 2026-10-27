@@ -6,8 +6,8 @@ import ccxt
 import pandas as pd
 
 # === НАСТРОЙКИ BOT / TELEGRAM ===
-TELEGRAM_TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
-CHAT_ID = "ВАШ_ЧАТ_ИД"
+TELEGRAM_TOKEN = "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo"
+CHAT_ID = " 7810123995"
 TIMEFRAME = '15m'  # Таймфрейм (15 минут)
 # ================================
 
