@@ -9,7 +9,7 @@ from groq import AsyncGroq
 
 # Читаємо змінні з Render (або якщо їх немає — використовуємо запасні значення)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "ВСТАВТЕ_GROQ_КЛЮЧ_ТУТ")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@crypsignalsa")
 
 # Порт для Render (обов'язково для безкоштовного тарифу Web Service)
