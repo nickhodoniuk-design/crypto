@@ -1,334 +1,169 @@
 import os
-import json
+import re
 import asyncio
 import logging
-from datetime import datetime, timedelta
-import pytz
+import tempfile
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.types import (
-    ReplyKeyboardMarkup, 
-    KeyboardButton, 
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
-    CallbackQuery
+    CallbackQuery,
+    FSInputFile
 )
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from groq import AsyncGroq
-import aiosqlite
+import yt_dlp
 
-# ================= КОНФІГУРАЦІЯ =================
+# ================= НАЛАШТУВАННЯ =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8955162722:AAHxL1wUUNMn6V8a_qZZnemEpEBD9U05tgo")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
 PORT = int(os.getenv("PORT", 8080))
 
-KYIV_TZ = pytz.timezone("Europe/Kyiv")
-DB_NAME = "reminders.db"
+# ================= РЕКЛАМНИЙ БЛОК (МІНЯЙТЕ ТУТ) =================
+# Цей текст і посилання автоматично кріпляться під кожне завантажене відео та звук.
+# Можна використовувати HTML: <b>жирний</b>, <i>курсив</i>, <a href="...">посилання</a>.
+DEFAULT_AD = (
+    "🔥 <b>Спонсор:</b> Найвигідніші знижки та товари 👉 <a href='https://t.me/telegram'>Перейти в канал</a>\n"
+    "<i>(Купити рекламу в боті: @ваш_юзернейм)</i>"
+)
+AD_BANNER = os.getenv("AD_BANNER", DEFAULT_AD)
+# ================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-
-# ================= БАЗА ДАНИХ =================
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                title TEXT,
-                category TEXT,
-                trigger_time TEXT,
-                repeat_type TEXT,
-                is_active INTEGER DEFAULT 1
-            )
-        """)
-        await db.commit()
-
-
-# ================= СТАНИ FSM =================
-class ReminderForm(StatesGroup):
-    waiting_for_text = State()
-
-
-# ================= ГОЛОВНЕ МЕНЮ =================
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Створити нагадування"), KeyboardButton(text="📋 Мої нагадування")],
-            [KeyboardButton(text="🎂 Дні народження"), KeyboardButton(text="🚗 Авто & ТО")],
-            [KeyboardButton(text="💡 Комуналка & Рахунки")]
-        ],
-        resize_keyboard=True
-    )
+URL_PATTERN = re.compile(
+    r'(https?://(?:www\.)?(?:tiktok\.com|instagram\.com|pinterest\.com|pin\.it|youtube\.com/shorts/|youtu\.be)[^\s]+)'
+)
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    await init_db()
     text = (
         f"👋 Привіт, <b>{message.from_user.first_name}</b>!\n\n"
-        "Я твій розумний персональний помічник-нагадувальник 🧠\n\n"
-        "Я розумію <b>звичайну людську мову</b>. Ти можеш просто написати мені:\n"
-        "• <i>«Завтра о 15:00 забрати посилку»</i>\n"
-        "• <i>«1 числа щомісяця передати показники світла о 09:00»</i>\n"
-        "• <i>«18 серпня день народження у брата, нагадувати щороку»</i>\n"
-        "• <i>«Заміна мастила через 5 місяців»</i>\n\n"
-        "Обери категорію нижче або просто напиши повідомлення!"
+        "Я завантажувач медіа без водяних знаків 🚀\n\n"
+        "<b>Підтримувані соцмережі:</b>\n"
+        "• <b>TikTok</b> (відео та звук)\n"
+        "• <b>Instagram Reels</b>\n"
+        "• <b>YouTube Shorts</b>\n"
+        "• <b>Pinterest</b>\n\n"
+        "Просто надішли мені <b>посилання</b> на відео!"
     )
-    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML")
 
 
-# ================= ШІ-ПАРСИНГ ЗВИЧАЙНОЇ МОВИ (З АВТОПЕРЕКЛЮЧЕННЯМ МОДЕЛЕЙ) =================
-async def parse_reminder_with_ai(user_text: str) -> dict | None:
-    now = datetime.now(KYIV_TZ)
-    current_time_str = now.strftime("%Y-%m-%d %H:%M (%A)")
-
-    prompt = f"""
-    Ти — точний парсер нагадувань. Твоя задача — отримати людський текст українською та витягти з нього дату, час і суть нагадування.
-    
-    Поточний точний час і дата зараз в Україні: {current_time_str}.
-    
-    Текст користувача: "{user_text}"
-    
-    ПРАВИЛА РОЗРАХУНКУ:
-    1. Якщо рік не вказано, а дата вже минула в цьому році — бери наступний рік.
-    2. Якщо час не вказано, став за замовчуванням 09:00 ранку.
-    3. Типи повторення:
-       - "none" (разове)
-       - "monthly" (щомісяця, наприклад комуналка)
-       - "yearly" (щороку, наприклад дні народження, свята)
-       - "daily" (щодня)
-    4. Категорії: "birthday", "car", "utility", "general".
-    
-    ВІДПОВІДЬ НАДАЙ ВИКЛЮЧНО У ФОРМАТІ ЧИСТОГО JSON БЕЗ ЗАЙВИХ СЛІВ І БЕЗ БЛОКІВ КОДУ:
-    {{
-        "title": "Коротка суть нагадування",
-        "datetime": "YYYY-MM-DD HH:MM",
-        "repeat": "none|monthly|yearly|daily",
-        "category": "birthday|car|utility|general"
-    }}
-    """
-
-    # Список актуальних безкоштовних моделей Groq
-    AVAILABLE_MODELS = [
-        "openai/gpt-oss-20b",
-        "qwen/qwen3.8-27b",
-        "groq/compound"
-    ]
-
-    for model_name in AVAILABLE_MODELS:
-        try:
-            response = await groq_client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_completion_tokens=1000
-            )
-            content = response.choices[0].message.content.strip()
-            
-            # Витягуємо чистий JSON навіть якщо модель додала роздуми
-            start_idx = content.find("{")
-            end_idx = content.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                content = content[start_idx:end_idx+1]
-
-            return json.loads(content.strip())
-        except Exception as e:
-            logging.warning(f"Модель {model_name} не відповіла ({e}), перемикаємося на наступну...")
-            continue
-
-    logging.error("Жодна з доступних моделей Groq не змогла обробити запит.")
-    return None
-
-# ================= ОБРОБКА ПОВІДОМЛЕНЬ =================
-@dp.message(F.text == "➕ Створити нагадування")
-async def ask_for_reminder(message: types.Message, state: FSMContext):
-    await message.answer(
-        "✍️ Напишіть мені будь-яке нагадування своїми словами.\n\n"
-        "<i>Наприклад:\n"
-        "• «Завтра о 10:00 зателефонувати юристу»\n"
-        "• «14 травня день народження мами»\n"
-        "• «Заміна мастила через 6 місяців»</i>",
-        parse_mode="HTML"
-    )
-    await state.set_state(ReminderForm.waiting_for_text)
-
-
-# Швидкі шаблони
-@dp.message(F.text == "🎂 Дні народження")
-async def template_birthday(message: types.Message):
-    await message.answer(
-        "🎂 <b>Додавання дня народження:</b>\n\n"
-        "Напишіть, наприклад:\n"
-        "<code>День народження Андрія 25 вересня о 09:00</code>\n\n"
-        "<i>Я автоматично запам'ятаю дату і повторюватиму її щороку!</i>",
-        parse_mode="HTML"
-    )
-
-@dp.message(F.text == "🚗 Авто & ТО")
-async def template_car(message: types.Message):
-    await message.answer(
-        "🚗 <b>Автомобільні нагадування:</b>\n\n"
-        "Напишіть будь-що, наприклад:\n"
-        "• <code>Заміна мастила та фільтрів через 6 місяців</code>\n"
-        "• <code>Закінчується автоцивілка 1 грудня</code>\n"
-        "• <code>Перевзути зимову гуму 15 листопада</code>",
-        parse_mode="HTML"
-    )
-
-@dp.message(F.text == "💡 Комуналка & Рахунки")
-async def template_utility(message: types.Message):
-    await message.answer(
-        "💡 <b>Комуналка та щомісячні рахунки:</b>\n\n"
-        "Напишіть, наприклад:\n"
-        "• <code>1 числа щомісяця о 09:00 передати показники газу і води</code>\n"
-        "• <code>18 числа щомісяця сплатити комунальні послуги</code>\n"
-        "• <code>Оплата інтернету 25 числа щомісяця</code>",
-        parse_mode="HTML"
-    )
-
-
-# Універсальний обробник тексту (працює завжди, коли користувач щось пише)
-@dp.message(F.text & ~F.text.startswith("/"))
-async def process_reminder_text(message: types.Message, state: FSMContext):
-    if message.text in ["➕ Створити нагадування", "📋 Мої нагадування", "🎂 Дні народження", "🚗 Авто & ТО", "💡 Комуналка & Рахунки"]:
-        return
-
-    wait_msg = await message.answer("⏳ Аналізую дату і час...")
-    data = await parse_reminder_with_ai(message.text)
-
-    if not data or "datetime" not in data or "title" not in data:
-        await wait_msg.edit_text(
-            "❌ Не вдалося розпізнати точну дату або час.\n"
-            "Спробуйте написати чіткіше, наприклад: <i>«Завтра о 14:00 зустріч»</i> або <i>«1 травня о 09:00 день народження»</i>.",
-            parse_mode="HTML"
-        )
-        return
-
-    # Зберігаємо в базу даних
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
-            INSERT INTO reminders (user_id, title, category, trigger_time, repeat_type)
-            VALUES (?, ?, ?, ?, ?)
-        """, (message.from_user.id, data["title"], data.get("category", "general"), data["datetime"], data.get("repeat", "none")))
-        await db.commit()
-
-    repeat_labels = {
-        "none": "Один раз",
-        "daily": "Щодня",
-        "monthly": "Щомісяця",
-        "yearly": "Щороку"
+def download_video_sync(url: str, download_dir: str):
+    ydl_opts = {
+        'outtmpl': os.path.join(download_dir, '%(id)s.%(ext)s'),
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': 50 * 1024 * 1024,
     }
-
-    success_text = (
-        "✅ <b>Нагадування успішно створено!</b>\n\n"
-        f"📌 <b>Суть:</b> {data['title']}\n"
-        f"📅 <b>Коли:</b> {data['datetime']}\n"
-        f"🔁 <b>Повторення:</b> {repeat_labels.get(data.get('repeat', 'none'), 'Немає')}\n\n"
-        "<i>Я надішлю вам повідомлення у вказаний момент!</i>"
-    )
-    await wait_msg.edit_text(success_text, parse_mode="HTML")
-    await state.clear()
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        if not os.path.exists(filename):
+            base, _ = os.path.splitext(filename)
+            filename = f"{base}.mp4"
+        return filename, info.get('title', 'Відео')
 
 
-# ================= ПЕРЕГЛЯД ТА ВИДАЛЕННЯ =================
-@dp.message(F.text == "📋 Мої нагадування")
-async def list_reminders(message: types.Message):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id, title, trigger_time, repeat_type 
-            FROM reminders 
-            WHERE user_id = ? AND is_active = 1 
-            ORDER BY trigger_time ASC
-        """, (message.from_user.id,))
-        rows = await cursor.fetchall()
-
-    if not rows:
-        await message.answer("📭 У вас поки що немає активних нагадувань. Створіть перше!")
-        return
-
-    text = "📋 <b>Ваші активні нагадування:</b>\n\n"
-    buttons = []
-    for r_id, title, trig_time, repeat in rows:
-        repeat_mark = "🔁" if repeat != "none" else "⏳"
-        text += f"• <b>{trig_time}</b>: {title} ({repeat_mark})\n"
-        buttons.append([InlineKeyboardButton(text=f"❌ Видалити: {title[:20]}", callback_data=f"del_{r_id}")])
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_reminder(call: CallbackQuery):
-    r_id = int(call.data.split("_")[1])
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE reminders SET is_active = 0 WHERE id = ? AND user_id = ?", (r_id, call.from_user.id))
-        await db.commit()
-    
-    await call.answer("Видалено!")
-    await call.message.edit_text("✅ Нагадування видалено.")
+def download_audio_sync(url: str, download_dir: str):
+    ydl_opts = {
+        'outtmpl': os.path.join(download_dir, '%(id)s.%(ext)s'),
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': 50 * 1024 * 1024,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info.get('title', 'Аудіодоріжка')
 
 
-# ================= ФОНОВИЙ ПЕРЕВІРНИК ТА СПОВІЩУВАЧ =================
-async def reminder_scheduler():
-    while True:
+@dp.message(F.text.regexp(URL_PATTERN))
+async def handle_media_url(message: types.Message):
+    url = URL_PATTERN.search(message.text).group(1)
+    status_msg = await message.answer("⏳ <b>Завантажую відео без водяних знаків...</b>", parse_mode="HTML")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            now_str = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M")
-            async with aiosqlite.connect(DB_NAME) as db:
-                cursor = await db.execute("""
-                    SELECT id, user_id, title, trigger_time, repeat_type 
-                    FROM reminders 
-                    WHERE trigger_time <= ? AND is_active = 1
-                """, (now_str,))
-                due_reminders = await cursor.fetchall()
+            video_path, title = await asyncio.to_thread(download_video_sync, url, temp_dir)
 
-                for r_id, u_id, title, trig_time, repeat in due_reminders:
-                    # Надсилаємо нагадування користувачу
-                    try:
-                        alert_text = (
-                            "🔔 <b>НАГАДУВАННЯ!</b>\n\n"
-                            f"📌 <b>{title}</b>\n\n"
-                            f"<i>Час: {trig_time}</i>"
-                        )
-                        await bot.send_message(chat_id=u_id, text=alert_text, parse_mode="HTML")
-                    except Exception as e:
-                        logging.error(f"Помилка відправки користувачу {u_id}: {e}")
+            if not os.path.exists(video_path):
+                await status_msg.edit_text("❌ Не вдалося зберегти відео.")
+                return
 
-                    # Обробляємо повторення
-                    if repeat == "none":
-                        await db.execute("UPDATE reminders SET is_active = 0 WHERE id = ?", (r_id,))
-                    else:
-                        dt = datetime.strptime(trig_time, "%Y-%m-%d %H:%M")
-                        if repeat == "daily":
-                            next_dt = dt + timedelta(days=1)
-                        elif repeat == "monthly":
-                            # Переносимо на 30 днів вперед
-                            next_dt = dt + timedelta(days=30)
-                        elif repeat == "yearly":
-                            # Переносимо на наступний рік
-                            next_dt = dt.replace(year=dt.year + 1)
-                        else:
-                            next_dt = dt
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎵 Завантажити лише аудіо (MP3)", callback_data="get_audio")]
+            ])
 
-                        next_time_str = next_dt.strftime("%Y-%m-%d %H:%M")
-                        await db.execute("UPDATE reminders SET trigger_time = ? WHERE id = ?", (next_time_str, r_id))
-
-                await db.commit()
+            # Формуємо підпис: Назва + Галочка + Рекламний блок
+            clean_title = re.sub(r'<[^>]+>', '', title)[:80]
+            caption = (
+                f"🎬 <b>{clean_title}</b>\n\n"
+                f"✨ <i>Завантажено без водяних знаків</i>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"{AD_BANNER}"
+            )
+            
+            video_file = FSInputFile(video_path)
+            await message.answer_video(
+                video=video_file, 
+                caption=caption, 
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await status_msg.delete()
 
         except Exception as e:
-            logging.error(f"Помилка в планувальнику: {e}")
+            logging.error(f"Помилка завантаження: {e}")
+            await status_msg.edit_text(
+                "❌ <b>Помилка:</b> не вдалося завантажити це відео.\n"
+                "<i>(Можливо, акаунт автора приватний або файл більший за 50 МБ)</i>",
+                parse_mode="HTML"
+            )
 
-        # Перевіряємо щохвилини
-        await asyncio.sleep(40)
+
+@dp.callback_query(F.data == "get_audio")
+async def extract_audio_callback(call: CallbackQuery):
+    orig_msg = call.message.reply_to_message
+    if not orig_msg or not orig_msg.text:
+        await call.answer("Не вдалося знайти посилання", show_alert=True)
+        return
+
+    url = URL_PATTERN.search(orig_msg.text).group(1)
+    await call.answer("⏳ Витягую аудіо...")
+    wait_msg = await call.message.answer("🎵 Конвертую аудіо...")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            audio_path, title = await asyncio.to_thread(download_audio_sync, url, temp_dir)
+            audio_file = FSInputFile(audio_path)
+            
+            audio_caption = (
+                f"🎧 <i>Оригінальний звук із відео</i>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"{AD_BANNER}"
+            )
+
+            await call.message.answer_audio(
+                audio=audio_file,
+                title=title[:40],
+                caption=audio_caption,
+                parse_mode="HTML"
+            )
+            await wait_msg.delete()
+        except Exception as e:
+            logging.error(f"Помилка аудіо: {e}")
+            await wait_msg.edit_text("❌ Не вдалося отримати аудіо.")
 
 
 # ================= ВЕБСЕРВЕР ДЛЯ RENDER =================
 async def handle_ping(request):
-    return web.Response(text="Smart Reminder Bot is running!")
+    return web.Response(text="Media Downloader Bot is Running!")
 
 async def start_web_server():
     app = web.Application()
@@ -337,13 +172,11 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info(f"Вебсервер запущено на порті {PORT}")
+    logging.info(f"Вебсервер активний на порті {PORT}")
 
 async def main():
-    await init_db()
     await asyncio.gather(
         start_web_server(),
-        reminder_scheduler(),
         dp.start_polling(bot)
     )
 
