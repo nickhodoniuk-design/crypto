@@ -18,16 +18,36 @@ def home():
     return "Бот работает в фоновом режиме!", 200
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+# === ИНИЦИАЛИЗАЦИЯ БИРЖИ С ОБХОДОМ БЛОКИРОВКИ ===
 exchange = ccxt.binance({
     'options': {'defaultType': 'future'},
     'enableRateLimit': True,
-    'urls': {
-        'api': {
-            'public': 'https://binance.com',
-            'private': 'https://binance.com',
-        }
-    }
 })
+# Переопределяем базовые адреса API на глобальные фьючерсные эндпоинты, 
+# которые не блокируют американские и европейские хостинги
+exchange.urls['api']['public'] = 'https://binance.com'
+exchange.urls['api']['private'] = 'https://binance.com'
+exchange.urls['api']['v1'] = 'https://binance.com/fapi/v1'
+
+def get_all_futures_symbols():
+    """Безопасное получение списка фьючерсов напрямую через fapi без использования основного ://binance.com"""
+    try:
+        # Делаем прямой запрос к фьючерсному API, минуя заблокированный спотовый эндпоинт
+        response = exchange.fapiPublicGetExchangeInfo()
+        symbols = []
+        if 'symbols' in response:
+            for market in response['symbols']:
+                # Фильтруем только активные пары к USDT (например, BTCUSDT)
+                if market['status'] == 'TRADING' and market['quoteAsset'] == 'USDT':
+                    # Превращаем в формат CCXT (BTC/USDT)
+                    base = market['baseAsset']
+                    quote = market['quoteAsset']
+                    symbols.append(f"{base}/{quote}")
+        return symbols
+    except Exception as e:
+        print(f"Ошибка получения монет через fapi: {e}")
+        return []
+
 
 
 def calculate_rsi(series, period=14):
